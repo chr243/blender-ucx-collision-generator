@@ -77,7 +77,12 @@ Blender nie ma wbudowanego V-HACD. Dodatek (v1.1+) implementuje **BFS AABB media
 5. Nowe obiekty z `matrix_world = source.matrix_world`, display `WIRE`.
 6. Sprzątanie tymczasowych danych.
 
-Przetestowane headless na Blender **4.3.2** z modelem Poly Haven `rock_07` (CC0): nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.0, pokrycie wierzchołków ≈ 100%.
+Przetestowane headless na Blender **4.3.2** (v1.2+):
+- Poly Haven `rock_07` (CC0)
+- Poly Haven `namaqualand_cliff_01` (~94k tris, trudny klif)
+- Poly Haven `boulder_01` (~66k tris)
+
+Nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.0, pokrycie wierzchołków ≈ 100% na Low/Medium/High.
 
 ### Ograniczenia
 

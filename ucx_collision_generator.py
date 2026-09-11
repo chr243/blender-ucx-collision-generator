@@ -16,7 +16,7 @@ face-center clusters) approximating V-HACD without the VHACD library.
 bl_info = {
     "name": "UCX Collision Generator",
     "author": "Blender Assistant",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 3, 0),
     "location": "View3D > Sidebar > UCX",
     "description": "Generate UCX convex collision meshes for Unreal Engine 5",
@@ -43,10 +43,10 @@ from mathutils import Vector
 
 PRESETS = {
     "LOW": {
-        "max_hulls": 4,
-        "simplify": 0.08,
+        "max_hulls": 6,
+        "simplify": 0.15,
         "min_size": 0.05,
-        "max_verts": 24,
+        "max_verts": 32,
         "remove_small": 0.02,
         "margin": 0.0,
         "accuracy": 0.35,
@@ -268,6 +268,42 @@ def _median_split_points(coords):
     return left, right
 
 
+
+def _expand_hull_to_cover(bm, cluster_coords, pad_frac: float = 0.02) -> None:
+    """
+    Uniformly scale hull verts from centroid so the hull AABB covers the
+    cluster AABB (plus a small pad). Keeps the mesh convex.
+    """
+    if not bm.verts or len(cluster_coords) < 1:
+        return
+    hcoords = [v.co.copy() for v in bm.verts]
+    hmn, hmx, _ = _bbox_extents(hcoords)
+    cmn, cmx, _ = _bbox_extents(cluster_coords)
+    # pad cluster target
+    csize = cmx - cmn
+    pad = csize * pad_frac
+    cmn = cmn - pad
+    cmx = cmx + pad
+
+    cen = sum(hcoords, Vector((0, 0, 0))) / len(hcoords)
+    # Avoid zero-size axes
+    def axis_scale(h0, h1, c0, c1, mid):
+        # scale factor so [h0,h1] mapped from mid covers [c0,c1]
+        hs = max(abs(h0 - mid), abs(h1 - mid), 1e-12)
+        cs = max(abs(c0 - mid), abs(c1 - mid), 0.0)
+        return max(1.0, cs / hs)
+
+    sx = axis_scale(hmn.x, hmx.x, cmn.x, cmx.x, cen.x)
+    sy = axis_scale(hmn.y, hmx.y, cmn.y, cmx.y, cen.y)
+    sz = axis_scale(hmn.z, hmx.z, cmn.z, cmx.z, cen.z)
+    # Uniform scale keeps better aspect for collision; use max axis
+    s = max(sx, sy, sz)
+    if s <= 1.0001:
+        return
+    for v in bm.verts:
+        v.co = cen + (v.co - cen) * s
+
+
 def _partition_points(coords, max_parts: int, accuracy: float, remove_small: float):
     """
     Breadth-first AABB median splits until max_parts (or parts are small / few points).
@@ -288,11 +324,11 @@ def _partition_points(coords, max_parts: int, accuracy: float, remove_small: flo
     coords = unique
 
     parts = [coords]
-    # Higher accuracy => allow more splits toward max_parts
-    target = max(1, int(round(1 + (max_parts - 1) * max(0.05, min(1.0, accuracy)))))
-    target = min(max_parts, target)
+    # Always try to reach max_parts; accuracy only softens early-stop thresholds
+    target = max(1, int(max_parts))
 
-    min_points = max(4, int(8 * (1.0 - accuracy) + 4))  # ~4..12
+    # Higher accuracy => allow smaller leftover parts before stopping splits
+    min_points = max(4, int(10 * (1.0 - accuracy) + 4))  # ~4..14
 
     safety = 0
     while len(parts) < target and safety < max_parts * 4:
@@ -639,10 +675,25 @@ def generate_ucx_for_object(obj, props, report_fn=None) -> int:
         effective_min = min(props.min_size, mesh_diag * 0.02)
         effective_remove = min(props.remove_small, mesh_diag * 0.01) if props.remove_small > 0 else 0.0
 
-        # Vertex-space partition — every working vert contributes to coverage
-        all_coords = [v.co.copy() for v in bm_work.verts]
+        # Fuller vert cloud for fitting hulls (separate from light partition cloud)
+        bm_full = _evaluated_mesh_to_bmesh(obj, depsgraph)
+        try:
+            try:
+                bmesh.ops.triangulate(bm_full, faces=list(bm_full.faces))
+            except Exception:
+                pass
+            full_ratio = min(1.0, max(props.simplify * 2.5, 0.35))
+            if len(bm_full.faces) > 80000:
+                _decimate_bmesh(bm_full, full_ratio)
+            bm_full.verts.ensure_lookup_table()
+            full_coords = [v.co.copy() for v in bm_full.verts]
+        finally:
+            bm_full.free()
+
+        # Partition on lighter working cloud, then refill each region from fuller cloud
+        work_coords = [v.co.copy() for v in bm_work.verts]
         clusters = _partition_points(
-            all_coords,
+            work_coords,
             max_parts=props.max_hulls,
             accuracy=props.accuracy,
             remove_small=effective_remove,
@@ -651,8 +702,29 @@ def generate_ucx_for_object(obj, props, report_fn=None) -> int:
         target_col = _ensure_ucx_collection(obj, props.create_collection)
         source_mw = obj.matrix_world.copy()
 
+        # Assign every fuller-res vert to the nearest cluster centroid (no AABB gaps)
+        centroids = []
+        for seed_coords in clusters:
+            if not seed_coords:
+                centroids.append(None)
+                continue
+            centroids.append(sum(seed_coords, Vector((0, 0, 0))) / len(seed_coords))
+
+        assigned = [[] for _ in clusters]
+        for c in full_coords:
+            best_i = 0
+            best_d = float("inf")
+            for i, cen in enumerate(centroids):
+                if cen is None:
+                    continue
+                d = (c - cen).length_squared
+                if d < best_d:
+                    best_d = d
+                    best_i = i
+            assigned[best_i].append(c)
+
         hull_index = 0
-        for coords in clusters:
+        for coords in assigned:
             if hull_index >= props.max_hulls:
                 break
 
@@ -661,6 +733,12 @@ def generate_ucx_for_object(obj, props, report_fn=None) -> int:
 
             if effective_remove > 0.0 and _bbox_diagonal(coords) < effective_remove:
                 continue
+
+            max_input = max(800, int(props.max_verts) * 40) if props.max_verts > 0 else 4000
+            max_input = min(max_input, 6000)
+            if len(coords) > max_input:
+                centroid = sum(coords, Vector((0, 0, 0))) / len(coords)
+                coords = sorted(coords, key=lambda c: (c - centroid).length, reverse=True)[:max_input]
 
             hull_bm, reason = _build_hull_mesh(
                 coords,
@@ -672,6 +750,8 @@ def generate_ucx_for_object(obj, props, report_fn=None) -> int:
                 continue
 
             try:
+                # Ensure hull AABB covers all verts assigned to this cluster
+                _expand_hull_to_cover(hull_bm, coords, pad_frac=0.02)
                 mesh_data = bpy.data.meshes.new(ucx_name(obj.name, hull_index))
                 hull_bm.to_mesh(mesh_data)
                 mesh_data.update()
