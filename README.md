@@ -55,12 +55,15 @@ Przeznaczony głównie do skał, klifów i terenu — zamiast jednego AABB tworz
 | **Remove Tiny Fragments** | Próg odrzucania drobnych klastrów przed hullowaniem |
 | **Collision Margin** | Ekspansja hulli od centroidu (jednostki lokalne) |
 | **Create UCX Collection** | Umieść wyniki w kolekcji `UCX_<nazwa_źródła>` |
+| **Preserve Cavities** | Staraj się nie zatykać tuneli/łuków (auto-wykrywanie through-bore) |
 
 ### Presety
 
-- **Low** — 4 hulle, mocne uproszczenie (szybkie / tanie)
-- **Medium** — 10 hulli, balans
-- **High** — 20 hulli, drobniejszy podział
+- **Low** — 12 hulli, mocne uproszczenie (szybkie / tanie)
+- **Medium** — 18 hulli, balans
+- **High** — 28 hulli, drobniejszy podział
+
+Wszystkie presety mają **Preserve Cavities** włączone domyślnie.
 
 Po wyborze presetu wartości można dalej ręcznie zmieniać.
 
@@ -68,27 +71,37 @@ Po wyborze presetu wartości można dalej ręcznie zmieniać.
 
 ## Algorytm
 
-Blender nie ma wbudowanego V-HACD. Dodatek (v1.1+) implementuje **BFS AABB median-split na chmurze wierzchołków** + `convex_hull`:
+Blender nie ma wbudowanego V-HACD. Dodatek (v1.2+) implementuje **BFS AABB median-split na chmurze wierzchołków** + `convex_hull`:
 
 1. Pobranie ewaluowanej siatki przez depsgraph (bez aplikowania modifierów na źródle).
 2. Tymczasowy `bmesh` w **lokalnej przestrzeni** źródła + decimate.
-3. Zrównoważony podział wierzchołków wzdłuż najdłuższej osi AABB, aż do limitu hulli / dokładności — każdy wierzchołek roboczy trafia do dokładnie jednej części (dobre pokrycie powierzchni).
-4. Dla każdej części: czysty `bmesh.ops.convex_hull` (z usunięciem `geom_interior`), margin, limit wierzchołków, filtr rozmiaru (adaptacyjny względem rozmiaru mesha).
+3. Zrównoważony podział wierzchołków (BFS) aż do limitu hulli / dokładności.
+4. Dla każdej części: czysty `bmesh.ops.convex_hull` (z usunięciem `geom_interior`), lekkie dopasowanie (expand), limit wierzchołków.
 5. Nowe obiekty z `matrix_world = source.matrix_world`, display `WIRE`.
 6. Sprzątanie tymczasowych danych.
 
-Przetestowane headless na Blender **4.3.2** (v1.2+):
-- Poly Haven `rock_07` (CC0)
-- Poly Haven `namaqualand_cliff_01` (~94k tris, trudny klif)
-- Poly Haven `boulder_01` (~66k tris)
+### Preserve Cavities (v1.3)
 
-Nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.0, pokrycie wierzchołków ≈ 100% na Low/Medium/High.
+Gdy włączone, dodatek wykrywa **przelotowy tunel/łuk** (powietrze zewnętrzne przez środek masy + otwarte końce z lokalnymi ścianami) i wtedy:
+
+- zwiększa budżet hulli,
+- dzieli klastry z dużą ilością powietrza w AABB,
+- przypisuje wierzchołki po seed AABB (żeby nie scalać przeciwległych ścian tunelu),
+- czyści korki w bore (test point-in-convex na próbkach centerline).
+
+Otwarte klify / pełne skały zwykle **nie** wchodzą w ten tryb (filtr ray + stosunek odległości środka do AABB).
+
+Przetestowane headless na Blender **4.3.2** (v1.3):
+- Poly Haven `rock_07`, `boulder_01`, `namaqualand_cliff_01/02`, `rock_face_02` (CC0) — solidy
+- Syntetyczne arch/tunnel (`SM_RockArch_Tunnel_01/02`) — centerline w większości otwarty, coverage ≥ 0.90
+
+Nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.0.
 
 ### Ograniczenia
 
-- To **przybliżenie** V-HACD, nie pełny Voxel HACD — hull’e mogą się mocniej nakładać i gorzej „wciskać” w głębokie wklęsłości.
-- Bardzo wklęsłe kształty mogą wymagać presetu **High** albo ręcznego dopracowania.
-- Jakość zależy od `simplify` / `max_hulls`.
+- To **przybliżenie** V-HACD, nie pełny Voxel HACD — hull’e mogą się nakładać.
+- Bardzo wklęsłe / nieregularne tunele mogą nadal mieć lokalne „korki”; sprawdzaj w UE5 i ewentualnie podnieś preset / `max_hulls`.
+- Off-center bore (tunel daleko od środka AABB) może nie włączyć auto cavity mode — wtedy zostaw **Preserve Cavities** i zwiększ liczbę hulli ręcznie, albo wycentruj otwór w assetcie.
 - Nie zastępuje ręcznej kolizji w krytycznych assetach gameplayowych.
 
 ---
