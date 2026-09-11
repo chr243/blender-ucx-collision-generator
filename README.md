@@ -68,22 +68,23 @@ Po wyborze presetu wartości można dalej ręcznie zmieniać.
 
 ## Algorytm
 
-Blender nie ma wbudowanego V-HACD. Dodatek implementuje **rekurencyjną przestrzenną dekompozycję wypukłą**:
+Blender nie ma wbudowanego V-HACD. Dodatek (v1.1+) implementuje **BFS AABB median-split na chmurze wierzchołków** + `convex_hull`:
 
 1. Pobranie ewaluowanej siatki przez depsgraph (bez aplikowania modifierów na źródle).
-2. Budowa tymczasowego `bmesh` w **lokalnej przestrzeni** źródła.
-3. Opcjonalny decimate kopii roboczej.
-4. Rekurencyjny podział klastrów ścian wzdłuż najdłuższej osi AABB (median split środków ścian), aż do limitu hulli / wypukłości / dokładności.
-5. Dla każdego klastra: `bmesh.ops.convex_hull`, margin, limit wierzchołków, filtr rozmiaru.
-6. Nowe obiekty z `matrix_world = source.matrix_world`, display `WIRE`.
-7. Sprzątanie tymczasowych danych.
+2. Tymczasowy `bmesh` w **lokalnej przestrzeni** źródła + decimate.
+3. Zrównoważony podział wierzchołków wzdłuż najdłuższej osi AABB, aż do limitu hulli / dokładności — każdy wierzchołek roboczy trafia do dokładnie jednej części (dobre pokrycie powierzchni).
+4. Dla każdej części: czysty `bmesh.ops.convex_hull` (z usunięciem `geom_interior`), margin, limit wierzchołków, filtr rozmiaru (adaptacyjny względem rozmiaru mesha).
+5. Nowe obiekty z `matrix_world = source.matrix_world`, display `WIRE`.
+6. Sprzątanie tymczasowych danych.
+
+Przetestowane headless na Blender **4.3.2** z modelem Poly Haven `rock_07` (CC0): nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.0, pokrycie wierzchołków ≈ 100%.
 
 ### Ograniczenia
 
-- To **przybliżenie** V-HACD, nie pełny algorytm Voxel HACD — wyniki mogą być mniej optymalne (więcej overlapu / mniej „szczelne” wypełnienie wklęsłości).
-- Bardzo gęste / wklęsłe siatki mogą wymagać presetu **High** i ręcznego dopracowania.
-- Jakość zależy od uproszczenia (`simplify`) — zbyt niski współczynnik gubi detale kształtu.
-- Nie zastępuje ręcznie malowanych / autorskich kolizji w krytycznych assetach gameplayowych.
+- To **przybliżenie** V-HACD, nie pełny Voxel HACD — hull’e mogą się mocniej nakładać i gorzej „wciskać” w głębokie wklęsłości.
+- Bardzo wklęsłe kształty mogą wymagać presetu **High** albo ręcznego dopracowania.
+- Jakość zależy od `simplify` / `max_hulls`.
+- Nie zastępuje ręcznej kolizji w krytycznych assetach gameplayowych.
 
 ---
 
@@ -118,14 +119,15 @@ Jeśli sklonowałeś całe repo do addons jako `blender-ucx-collision-generator/
 3. Wyszukaj **UCX** i włącz checkbox
 4. Zrestartuj Blendera
 
-### Szybka naprawa B (folder)
+### Szybka naprawa B (ręczny copy)
 
-Skopiuj folder `ucx_collision_generator/` (ten z `__init__.py` w środku) do:
+Skopiuj **wyłącznie** plik `ucx_collision_generator.py` (nie całe repo) do:
 
 - Windows: `%APPDATA%\Blender Foundation\Blender\4.3\scripts\addons\`
 - macOS: `~/Library/Application Support/Blender/4.3/scripts/addons/`
 - Linux: `~/.config/blender/4.3/scripts/addons/`
 
+Nie trzymaj jednocześnie folderu i pliku o tej samej nazwie — Blender zgłosi *multiple addons with the same name*.
 Potem Preferences → Add-ons → odśwież / restart → szukaj **UCX**.
 
 ### Inne

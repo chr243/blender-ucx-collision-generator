@@ -16,7 +16,7 @@ face-center clusters) approximating V-HACD without the VHACD library.
 bl_info = {
     "name": "UCX Collision Generator",
     "author": "Blender Assistant",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 3, 0),
     "location": "View3D > Sidebar > UCX",
     "description": "Generate UCX convex collision meshes for Unreal Engine 5",
@@ -216,6 +216,7 @@ def find_ucx_objects(source_name: str, objects=None):
     return [obj for obj in objects if pattern.match(obj.name)]
 
 
+
 # ---------------------------------------------------------------------------
 # Geometry helpers (bmesh / mathutils only)
 # ---------------------------------------------------------------------------
@@ -239,204 +240,84 @@ def _bbox_extents(coords):
     return mn, mx, mx - mn
 
 
-def _face_center(bm_face) -> Vector:
-    """Average of face vertex positions (local space)."""
-    verts = bm_face.verts
-    if not verts:
-        return Vector((0, 0, 0))
-    acc = Vector((0, 0, 0))
-    for v in verts:
-        acc += v.co
-    return acc / len(verts)
-
-
-def _estimate_convexity(bm, face_indices) -> float:
+def _median_split_points(coords):
     """
-    Rough convexity score in [0, 1] for a face subset.
-    Uses hull-vertex-count vs unique-vertex-count heuristic on the subset.
-    1.0 ≈ already convex / very simple; lower ≈ needs more splits.
+    Split a point list by AABB longest axis at the median.
+    Returns (left, right). Either may be empty on failure.
     """
-    if not face_indices:
-        return 1.0
+    if len(coords) < 2:
+        return list(coords), []
 
-    vert_set = set()
-    for fi in face_indices:
-        face = bm.faces[fi]
-        for v in face.verts:
-            vert_set.add(v.index)
-
-    n_verts = len(vert_set)
-    if n_verts < 4:
-        return 1.0
-
-    # Build a temporary hull from unique verts to compare counts
-    coords = [bm.verts[i].co.copy() for i in vert_set]
-    tmp = bmesh.new()
-    try:
-        for co in coords:
-            tmp.verts.new(co)
-        tmp.verts.ensure_lookup_table()
-        result = bmesh.ops.convex_hull(tmp, input=list(tmp.verts))
-        hull_geom = result.get("geom", [])
-        hull_vert_count = sum(1 for g in hull_geom if isinstance(g, bmesh.types.BMVert))
-        if hull_vert_count == 0:
-            # Fallback: all remaining verts are on the hull
-            hull_vert_count = len(tmp.verts)
-        # If almost all verts lie on the hull, the set is nearly convex
-        ratio = hull_vert_count / max(n_verts, 1)
-        return min(1.0, max(0.0, ratio))
-    except Exception:
-        return 0.5
-    finally:
-        tmp.free()
-
-
-def _should_stop_splitting(
-    bm,
-    face_indices,
-    depth: int,
-    max_hulls: int,
-    current_leaf_count: int,
-    accuracy: float,
-    remove_small: float,
-) -> bool:
-    """
-    Decide whether a face cluster is a final leaf.
-    Stop when:
-      - producing another split would exceed remaining hull budget, OR
-      - cluster is small enough / nearly convex relative to accuracy.
-    """
-    if len(face_indices) <= 1:
-        return True
-
-    centers = [_face_center(bm.faces[fi]) for fi in face_indices]
-    diag = _bbox_diagonal(centers)
-    if remove_small > 0.0 and diag < remove_small:
-        return True
-
-    # Budget: if we already have (or would have) enough leaves, stop
-    # remaining slots for further subdivision of this branch
-    if current_leaf_count >= max_hulls:
-        return True
-
-    convexity = _estimate_convexity(bm, face_indices)
-    # Higher accuracy => require higher convexity (or keep splitting)
-    # Map accuracy to a threshold: low accuracy accepts lower convexity sooner
-    threshold = 0.35 + 0.55 * accuracy  # ~0.38 .. ~0.90
-    if convexity >= threshold:
-        return True
-
-    # Also stop if the cluster has very few faces relative to accuracy
-    # (accuracy high => allow smaller clusters before stopping)
-    min_faces = max(2, int(8 * (1.0 - accuracy) + 2))
-    if len(face_indices) <= min_faces:
-        return True
-
-    # Depth safety (prevent runaway recursion)
-    max_depth = max(4, int(6 + accuracy * 10))
-    if depth >= max_depth:
-        return True
-
-    return False
-
-
-def _median_split_faces(bm, face_indices):
-    """
-    Split face indices by AABB longest axis using median of face centers.
-    Returns (left_indices, right_indices). Either may be empty on failure.
-    """
-    if len(face_indices) < 2:
-        return list(face_indices), []
-
-    centers = [(fi, _face_center(bm.faces[fi])) for fi in face_indices]
-    coords = [c for _, c in centers]
     _mn, _mx, size = _bbox_extents(coords)
-
-    # Longest axis
     axis = 0
     if size.y >= size.x and size.y >= size.z:
         axis = 1
     elif size.z >= size.x and size.z >= size.y:
         axis = 2
 
-    centers.sort(key=lambda item: item[1][axis])
-    mid = len(centers) // 2
-    # Avoid empty side when many share the same coordinate
+    ordered = sorted(coords, key=lambda c: c[axis])
+    mid = len(ordered) // 2
     if mid == 0:
         mid = 1
-    if mid >= len(centers):
-        mid = len(centers) - 1
-
-    left = [fi for fi, _ in centers[:mid]]
-    right = [fi for fi, _ in centers[mid:]]
+    if mid >= len(ordered):
+        mid = len(ordered) - 1
+    left = ordered[:mid]
+    right = ordered[mid:]
+    if not left or not right:
+        return list(coords), []
     return left, right
 
 
-def _recursive_decompose(
-    bm,
-    face_indices,
-    max_hulls: int,
-    accuracy: float,
-    remove_small: float,
-    depth: int = 0,
-    leaf_counter: list | None = None,
-):
+def _partition_points(coords, max_parts: int, accuracy: float, remove_small: float):
     """
-    Recursively split face clusters. Returns a list of face-index lists (leaves).
-    leaf_counter is a mutable [int] tracking how many leaves are planned so far
-    so we can respect max_hulls globally.
+    Breadth-first AABB median splits until max_parts (or parts are small / few points).
+    Always keeps every input point in exactly one part — good surface coverage.
     """
-    if leaf_counter is None:
-        leaf_counter = [0]
-
-    if not face_indices:
+    if not coords:
         return []
 
-    # If stopping, this cluster becomes one leaf
-    if _should_stop_splitting(
-        bm, face_indices, depth, max_hulls, leaf_counter[0] + 1, accuracy, remove_small
-    ):
-        leaf_counter[0] += 1
-        return [list(face_indices)]
+    # Deduplicate nearly-identical verts to keep hulls stable
+    unique = []
+    seen = set()
+    for c in coords:
+        key = (round(c.x, 5), round(c.y, 5), round(c.z, 5))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(c.copy())
+    coords = unique
 
-    # If splitting would exceed max_hulls (need +1 relative to current plan), stop
-    # We tentatively need two children; if leaf_counter + 1 already at max, stop
-    if leaf_counter[0] + 1 >= max_hulls:
-        leaf_counter[0] += 1
-        return [list(face_indices)]
+    parts = [coords]
+    # Higher accuracy => allow more splits toward max_parts
+    target = max(1, int(round(1 + (max_parts - 1) * max(0.05, min(1.0, accuracy)))))
+    target = min(max_parts, target)
 
-    left, right = _median_split_faces(bm, face_indices)
-    if not left or not right:
-        leaf_counter[0] += 1
-        return [list(face_indices)]
+    min_points = max(4, int(8 * (1.0 - accuracy) + 4))  # ~4..12
 
-    # Reserve one slot conceptually for the second child while recursing left
-    results = []
-    results.extend(
-        _recursive_decompose(
-            bm, left, max_hulls, accuracy, remove_small, depth + 1, leaf_counter
-        )
-    )
-    # Cap: if we already hit max_hulls, dump remaining right as a single leaf
-    if leaf_counter[0] >= max_hulls:
-        if right:
-            # Merge right into last leaf or add if somehow under
-            results.append(list(right))
-            leaf_counter[0] += 1
-        return results
+    safety = 0
+    while len(parts) < target and safety < max_parts * 4:
+        safety += 1
+        # Split the largest remaining part
+        idx = max(range(len(parts)), key=lambda i: _bbox_diagonal(parts[i]))
+        part = parts[idx]
+        diag = _bbox_diagonal(part)
+        if len(part) < min_points * 2:
+            break
+        if remove_small > 0.0 and diag < remove_small * 2.0:
+            break
+        left, right = _median_split_points(part)
+        if len(left) < 3 or len(right) < 3:
+            break
+        parts[idx] = left
+        parts.append(right)
 
-    results.extend(
-        _recursive_decompose(
-            bm, right, max_hulls, accuracy, remove_small, depth + 1, leaf_counter
-        )
-    )
-    return results
+    return parts
 
 
 def _decimate_bmesh(bm, ratio: float) -> None:
     """
-    Collapse-decimate in-place toward a face budget.
-    ratio is fraction of faces to keep (0.01 .. 1.0).
+    Reduce face count of a working bmesh toward ratio * current faces.
+    Uses dissolve of short edges — good enough for collision proxy generation.
     """
     if ratio >= 0.999 or len(bm.faces) < 8:
         return
@@ -456,15 +337,11 @@ def _decimate_bmesh(bm, ratio: float) -> None:
     except Exception:
         pass
 
-    # Iterative edge-collapse style reduction via dissolve of short edges
-    # Prefer dissolve_degenerate + limited dissolve as a safe no-ops fallback,
-    # then use triangulate + dissolve if still over budget.
     safety = 0
     while len(bm.faces) > target_faces and safety < 64:
         safety += 1
         bm.faces.ensure_lookup_table()
         bm.edges.ensure_lookup_table()
-        # Dissolve a portion of shortest edges
         edges = sorted(bm.edges, key=lambda e: e.calc_length())
         dissolve_count = max(1, (len(bm.faces) - target_faces) // 2)
         to_dissolve = [e for e in edges[:dissolve_count] if e.is_valid]
@@ -479,7 +356,6 @@ def _decimate_bmesh(bm, ratio: float) -> None:
             )
         except Exception:
             break
-        # Clean up
         try:
             bmesh.ops.dissolve_degenerate(bm, dist=1e-6, edges=list(bm.edges))
         except Exception:
@@ -515,18 +391,36 @@ def _build_hull_mesh(
         bm.verts.ensure_lookup_table()
 
         try:
-            bmesh.ops.convex_hull(bm, input=list(bm.verts))
+            hull_result = bmesh.ops.convex_hull(bm, input=list(bm.verts))
         except Exception:
             bm.free()
             return None, "hull_failed"
 
-        # Remove interior geometry left by convex_hull
-        # convex_hull tags unused; delete non-hull geometry
-        # After convex_hull, interior verts/edges/faces may remain in 'geom_interior'
-        # Clean: keep only faces that exist, remove loose verts
-        bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6)
+        # geom_interior / geom_unused often overlap — dedupe by BMVert identity
+        to_delete = []
+        seen = set()
+        for g in list(hull_result.get("geom_interior", [])) + list(
+            hull_result.get("geom_unused", [])
+        ):
+            if not isinstance(g, bmesh.types.BMVert):
+                continue
+            if not g.is_valid:
+                continue
+            vid = g.index
+            if vid in seen:
+                continue
+            seen.add(vid)
+            to_delete.append(g)
+        if to_delete:
+            bmesh.ops.delete(bm, geom=to_delete, context="VERTS")
 
-        # Delete faces that are somehow invalid; ensure manifold-ish
+        bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6)
+        bm.faces.ensure_lookup_table()
+        bm.verts.ensure_lookup_table()
+        loose = [v for v in bm.verts if v.is_valid and not v.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context="VERTS")
+
         bm.faces.ensure_lookup_table()
         bm.verts.ensure_lookup_table()
 
@@ -534,7 +428,7 @@ def _build_hull_mesh(
             bm.free()
             return None, "empty_hull"
 
-        # Margin: scale verts from centroid
+        # Margin: expand verts from centroid
         if margin > 0.0 and bm.verts:
             centroid = Vector((0, 0, 0))
             for v in bm.verts:
@@ -546,14 +440,11 @@ def _build_hull_mesh(
                 if length > 1e-12:
                     v.co = centroid + direction.normalized() * (length + margin)
                 else:
-                    # Degenerate at centroid — nudge along +X
                     v.co = centroid + Vector((margin, 0, 0))
 
-        # Limit verts per hull via further simplification
         if max_verts > 0 and len(bm.verts) > max_verts:
             _limit_hull_verts(bm, max_verts)
 
-        # Re-check size after margin / simplify
         coords_out = [v.co.copy() for v in bm.verts]
         if _bbox_diagonal(coords_out) < min_size:
             bm.free()
@@ -569,50 +460,43 @@ def _build_hull_mesh(
 
 
 def _limit_hull_verts(bm, max_verts: int) -> None:
-    """Reduce hull vertex count toward max_verts by dissolving short edges."""
-    safety = 0
-    while len(bm.verts) > max_verts and safety < 128:
-        safety += 1
-        bm.edges.ensure_lookup_table()
-        bm.verts.ensure_lookup_table()
-        if not bm.edges:
-            break
-        edges = sorted((e for e in bm.edges if e.is_valid), key=lambda e: e.calc_length())
-        if not edges:
-            break
-        # Dissolve a few shortest edges each pass
-        batch = edges[: max(1, (len(bm.verts) - max_verts))]
-        try:
-            bmesh.ops.dissolve_edges(
-                bm,
-                edges=batch,
-                use_verts=True,
-                use_face_split=False,
-            )
-        except Exception:
-            # Fallback: delete a vert with lowest valence that is not essential
-            break
-        try:
-            bmesh.ops.dissolve_degenerate(bm, dist=1e-5, edges=list(bm.edges))
-        except Exception:
-            pass
+    """Reduce hull vertex count toward max_verts, then rebuild convex hull."""
+    if max_verts < 4 or len(bm.verts) <= max_verts:
+        return
 
-    # If still over, rebuild convex hull from a subset of verts
-    if len(bm.verts) > max_verts:
-        coords = [v.co.copy() for v in bm.verts]
-        # Keep verts farthest from centroid (better shape preservation)
-        centroid = sum(coords, Vector((0, 0, 0))) / len(coords)
-        coords.sort(key=lambda c: (c - centroid).length, reverse=True)
-        keep = coords[:max_verts]
-        bm.clear()
-        for co in keep:
-            bm.verts.new(co)
-        bm.verts.ensure_lookup_table()
-        try:
-            bmesh.ops.convex_hull(bm, input=list(bm.verts))
-            bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6)
-        except Exception:
-            pass
+    coords = [v.co.copy() for v in bm.verts]
+    centroid = sum(coords, Vector((0, 0, 0))) / len(coords)
+    coords.sort(key=lambda c: (c - centroid).length, reverse=True)
+    keep = coords[:max_verts]
+    bm.clear()
+    for co in keep:
+        bm.verts.new(co)
+    bm.verts.ensure_lookup_table()
+    try:
+        hull_result = bmesh.ops.convex_hull(bm, input=list(bm.verts))
+        # geom_interior / geom_unused often overlap — dedupe by BMVert identity
+        to_delete = []
+        seen = set()
+        for g in list(hull_result.get("geom_interior", [])) + list(
+            hull_result.get("geom_unused", [])
+        ):
+            if not isinstance(g, bmesh.types.BMVert):
+                continue
+            if not g.is_valid:
+                continue
+            vid = g.index
+            if vid in seen:
+                continue
+            seen.add(vid)
+            to_delete.append(g)
+        if to_delete:
+            bmesh.ops.delete(bm, geom=to_delete, context="VERTS")
+        bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6)
+        loose = [v for v in bm.verts if v.is_valid and not v.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context="VERTS")
+    except Exception:
+        pass
 
 
 def _evaluated_mesh_to_bmesh(obj, depsgraph) -> bmesh.types.BMesh:
@@ -625,13 +509,11 @@ def _evaluated_mesh_to_bmesh(obj, depsgraph) -> bmesh.types.BMesh:
     bm = bmesh.new()
     try:
         bm.from_mesh(mesh)
-        # Coords from to_mesh are already in object/local space
         bm.faces.ensure_lookup_table()
         bm.verts.ensure_lookup_table()
         bm.edges.ensure_lookup_table()
         return bm
     finally:
-        # Always release the temporary evaluated mesh datablock reference
         eval_obj.to_mesh_clear()
 
 
@@ -735,7 +617,7 @@ def generate_ucx_for_object(obj, props, report_fn=None) -> int:
             report_fn({"WARNING"}, f"Empty mesh, skipping: {obj.name}")
             return 0
 
-        # Triangulate for more stable face centers / hulls
+        # Triangulate then decimate working copy (never touches the source)
         try:
             bmesh.ops.triangulate(bm_work, faces=list(bm_work.faces))
         except Exception:
@@ -743,67 +625,48 @@ def generate_ucx_for_object(obj, props, report_fn=None) -> int:
         bm_work.faces.ensure_lookup_table()
         bm_work.verts.ensure_lookup_table()
 
-        # Decimate working copy
         _decimate_bmesh(bm_work, props.simplify)
         bm_work.faces.ensure_lookup_table()
         bm_work.verts.ensure_lookup_table()
 
-        if len(bm_work.faces) == 0:
-            report_fn({"WARNING"}, f"No faces after simplification: {obj.name}")
+        if len(bm_work.verts) < 3:
+            report_fn({"WARNING"}, f"No geometry after simplification: {obj.name}")
             return 0
 
-        face_indices = [f.index for f in bm_work.faces]
-        clusters = _recursive_decompose(
-            bm_work,
-            face_indices,
-            max_hulls=props.max_hulls,
-            accuracy=props.accuracy,
-            remove_small=props.remove_small,
-        )
+        # Adaptive min size: user value is a fraction-like absolute in local units,
+        # but never discard parts that are still a meaningful fraction of the mesh.
+        mesh_diag = _bbox_diagonal([v.co.copy() for v in bm_work.verts])
+        effective_min = min(props.min_size, mesh_diag * 0.02)
+        effective_remove = min(props.remove_small, mesh_diag * 0.01) if props.remove_small > 0 else 0.0
 
-        # Cap to max_hulls (safety)
-        if len(clusters) > props.max_hulls:
-            # Merge excess into the last kept cluster
-            kept = clusters[: props.max_hulls - 1]
-            merged = []
-            for extra in clusters[props.max_hulls - 1 :]:
-                merged.extend(extra)
-            kept.append(merged)
-            clusters = kept
+        # Vertex-space partition — every working vert contributes to coverage
+        all_coords = [v.co.copy() for v in bm_work.verts]
+        clusters = _partition_points(
+            all_coords,
+            max_parts=props.max_hulls,
+            accuracy=props.accuracy,
+            remove_small=effective_remove,
+        )
 
         target_col = _ensure_ucx_collection(obj, props.create_collection)
         source_mw = obj.matrix_world.copy()
 
         hull_index = 0
-        for cluster in clusters:
+        for coords in clusters:
             if hull_index >= props.max_hulls:
                 break
 
-            # Gather unique verts for this face cluster (local space)
-            vert_ids = set()
-            for fi in cluster:
-                if fi < 0 or fi >= len(bm_work.faces):
-                    continue
-                face = bm_work.faces[fi]
-                if not face.is_valid:
-                    continue
-                for v in face.verts:
-                    vert_ids.add(v.index)
-
-            if len(vert_ids) < 3:
+            if len(coords) < 3:
                 continue
 
-            coords = [bm_work.verts[i].co.copy() for i in vert_ids if bm_work.verts[i].is_valid]
-
-            # Skip tiny fragments early
-            if props.remove_small > 0.0 and _bbox_diagonal(coords) < props.remove_small:
+            if effective_remove > 0.0 and _bbox_diagonal(coords) < effective_remove:
                 continue
 
             hull_bm, reason = _build_hull_mesh(
                 coords,
                 margin=props.margin,
                 max_verts=props.max_verts,
-                min_size=props.min_size,
+                min_size=effective_min,
             )
             if hull_bm is None:
                 continue
@@ -865,7 +728,7 @@ class OBJECT_OT_ucx_generate(Operator):
         selected = list(context.selected_objects)
 
         if not selected:
-            self.report({"ERROR"}, "No objects selected")
+            self.report({"WARNING"}, "No objects selected")
             return {"CANCELLED"}
 
         mesh_objs = [o for o in selected if o.type == "MESH"]
@@ -875,7 +738,7 @@ class OBJECT_OT_ucx_generate(Operator):
             self.report({"WARNING"}, f"Skipping non-mesh: {o.name}")
 
         if not mesh_objs:
-            self.report({"ERROR"}, "No mesh objects selected")
+            self.report({"WARNING"}, "No mesh objects selected")
             return {"CANCELLED"}
 
         total = 0
@@ -903,7 +766,7 @@ class OBJECT_OT_ucx_delete(Operator):
     def execute(self, context):
         selected = list(context.selected_objects)
         if not selected:
-            self.report({"ERROR"}, "No objects selected")
+            self.report({"WARNING"}, "No objects selected")
             return {"CANCELLED"}
 
         total = 0
@@ -936,7 +799,7 @@ class OBJECT_OT_ucx_regenerate(Operator):
         selected = list(context.selected_objects)
 
         if not selected:
-            self.report({"ERROR"}, "No objects selected")
+            self.report({"WARNING"}, "No objects selected")
             return {"CANCELLED"}
 
         # Delete first
