@@ -97,3 +97,39 @@ Blender nie ma wbudowanego V-HACD. Dodatek implementuje **rekurencyjną przestrz
 ## Licencja
 
 MIT
+
+
+---
+
+## Nie widać addonu na liście? (troubleshooting)
+
+Blender pokazuje na liście tylko:
+
+1. **pojedynczy plik** `…/scripts/addons/ucx_collision_generator.py`, **albo**
+2. **folder** `…/scripts/addons/ucx_collision_generator/` z plikiem `__init__.py` w środku.
+
+Jeśli sklonowałeś całe repo do addons jako `blender-ucx-collision-generator/`, Blender **nie** zobaczy addonu (brak `__init__.py` w rootcie tego folderu).
+
+### Szybka naprawa A (zalecana)
+
+1. Pobierz sam plik:  
+   https://github.com/chr243/blender-ucx-collision-generator/raw/main/ucx_collision_generator.py
+2. `Edit → Preferences → Add-ons → Install…` → wskaż ten `.py`
+3. Wyszukaj **UCX** i włącz checkbox
+4. Zrestartuj Blendera
+
+### Szybka naprawa B (folder)
+
+Skopiuj folder `ucx_collision_generator/` (ten z `__init__.py` w środku) do:
+
+- Windows: `%APPDATA%\Blender Foundation\Blender\4.3\scripts\addons\`
+- macOS: `~/Library/Application Support/Blender/4.3/scripts/addons/`
+- Linux: `~/.config/blender/4.3/scripts/addons/`
+
+Potem Preferences → Add-ons → odśwież / restart → szukaj **UCX**.
+
+### Inne
+
+- W polu wyszukiwania Add-ons wpisz `UCX` lub `Collision` (lista jest filtrowana).
+- Upewnij się, że patrzysz na Add-ons dla wersji **4.3** (nie innej instalacji Blendera).
+- `Window → Toggle System Console` (Windows) — jeśli jest błąd importu, będzie tam czerwony traceback.
