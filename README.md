@@ -4,6 +4,8 @@ Blender **4.3.2+** add-on that auto-generates **UCX** convex collision meshes fo
 
 Built mainly for rocks, cliffs, and terrain — instead of one AABB it creates multiple convex hulls that follow the shape.
 
+If you like it let me know via https://buymeacoffee.com/chr2436 ;)
+
 ---
 
 ## Install
