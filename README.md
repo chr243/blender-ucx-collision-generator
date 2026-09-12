@@ -1,26 +1,171 @@
 # UCX Collision Generator
 
+Blender **4.3.2+** add-on that auto-generates **UCX** convex collision meshes for **Unreal Engine 5** FBX export.
+
+Built mainly for rocks, cliffs, and terrain — instead of one AABB it creates multiple convex hulls that follow the shape.
+
+---
+
+## Install
+
+1. `Edit → Preferences → Add-ons → Install…`
+2. Select `ucx_collision_generator.py` **only** (single file, not the whole repo folder)
+3. Enable **UCX Collision Generator**
+4. Open the **3D Viewport** sidebar (`N`) → tab **UCX**
+
+Raw download:  
+https://github.com/chr243/blender-ucx-collision-generator/raw/main/ucx_collision_generator.py
+
+---
+
+## Usage
+
+1. Select one or more **Mesh** objects (e.g. `SM_Cliff_01`).
+2. Pick a preset (**Low / Medium / High**) or tweak parameters.
+3. Click **Generate UCX Collisions**.
+4. Objects appear as: `UCX_SM_Cliff_01_00`, `UCX_SM_Cliff_01_01`, …
+5. **Delete UCX** removes collisions matching the selected sources.
+6. **Regenerate UCX** = Delete + Generate.
+
+The source mesh is **never modified**. UCX objects copy the source `matrix_world`; hull geometry stays in source local space — correct alignment even with unapplied scale/rotation.
+
+### FBX export to UE5
+
+- Keep naming `UCX_<StaticMeshName>_XX` (zero-padded from `_00`).
+- UE5 recognizes `UCX_*` objects as convex collision on FBX import.
+- Export the source together with its UCX objects (or the `UCX_<name>` collection).
+
+---
+
+## Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| **Max Convex Hulls** | Max collision pieces per object |
+| **Target Accuracy** | Split aggressiveness (higher = tighter fit) |
+| **Min Hull Size** | Drop hulls whose bbox diagonal is below threshold |
+| **Geometry Simplification** | Decimate ratio on the working copy (lower = faster) |
+| **Max Verts Per Hull** | Vertex cap per hull (`0` = unlimited) |
+| **Remove Tiny Fragments** | Drop tiny clusters before hulling |
+| **Collision Margin** | Expand hulls from centroid (local units) |
+| **Create UCX Collection** | Put results in collection `UCX_<source_name>` |
+| **Preserve Cavities** | Avoid clogging tunnels/arches (auto through-bore detection) |
+
+### Presets
+
+- **Low** — 12 hulls, heavy simplification (fast / cheap)
+- **Medium** — 18 hulls, balanced
+- **High** — 28 hulls, finer splits
+
+All presets enable **Preserve Cavities** by default. You can still tweak values after picking a preset.
+
+---
+
+## Algorithm
+
+Blender has no built-in V-HACD. This add-on (v1.2+) uses **BFS AABB median-split on a vertex cloud** + `convex_hull`:
+
+1. Evaluated mesh via depsgraph (source modifiers are not applied destructively).
+2. Temporary `bmesh` in **source local space** + decimate.
+3. Balanced BFS vertex partition up to hull budget / accuracy.
+4. Per part: clean `bmesh.ops.convex_hull` (strip `geom_interior`), light expand, vertex limit.
+5. New objects with `matrix_world = source.matrix_world`, display `WIRE`.
+6. Cleanup of temporaries.
+
+### Preserve Cavities (v1.3)
+
+When enabled, the add-on detects a **through tunnel/arch** (exterior air through the mass center + open ends with local walls) and then:
+
+- raises the hull budget,
+- splits cavity-heavy AABB clusters,
+- assigns vertices by seed AABB (so opposite tunnel walls stay separate),
+- clears bore plugs (point-in-convex tests on centerline samples).
+
+Open cliffs / solid rocks usually **do not** enter this mode (ray filters + center-to-AABB distance ratio).
+
+Headless tests on Blender **4.3.2** (v1.3):
+
+- Poly Haven `rock_07`, `boulder_01`, `namaqualand_cliff_01/02`, `rock_face_02` (CC0) — solids
+- Synthetic arch/tunnel (`SM_RockArch_Tunnel_01/02`) — centerline mostly open, coverage ≥ 0.90
+
+UCX naming, delete/regenerate, unapplied transforms, convexity = 1.0.
+
+### Limitations
+
+- This is an **approximation** of V-HACD, not full voxel HACD — hulls may overlap.
+- Very concave / irregular tunnels can still get local plugs; check in UE5 and raise preset / `max_hulls` if needed.
+- An off-center bore (far from AABB center) may not trigger auto cavity mode — keep **Preserve Cavities** on and raise hull count, or center the opening in the asset.
+- Not a replacement for hand-authored collision on critical gameplay assets.
+
+---
+
+## Requirements
+
+- Blender **4.3.0+** (tested on 4.3.2+)
+- Only `bpy`, `bmesh`, `mathutils` — no external libraries
+
+---
+
+## License
+
+MIT
+
+---
+
+## Addon not showing up? (troubleshooting)
+
+Blender only lists:
+
+1. a **single file** `…/scripts/addons/ucx_collision_generator.py`, **or**
+2. a **folder** `…/scripts/addons/ucx_collision_generator/` with `__init__.py` inside.
+
+If you cloned the whole repo into addons as `blender-ucx-collision-generator/`, Blender **will not** see the add-on (no `__init__.py` at that folder root).
+
+### Quick fix A (recommended)
+
+1. Download the single file:  
+   https://github.com/chr243/blender-ucx-collision-generator/raw/main/ucx_collision_generator.py
+2. `Edit → Preferences → Add-ons → Install…` → pick that `.py`
+3. Search **UCX** and enable the checkbox
+4. Restart Blender
+
+### Quick fix B (manual copy)
+
+Copy **only** `ucx_collision_generator.py` (not the whole repo) to:
+
+- Windows: `%APPDATA%\Blender Foundation\Blender\4.3\scripts\addons\`
+- macOS: `~/Library/Application Support/Blender/4.3/scripts/addons/`
+- Linux: `~/.config/blender/4.3/scripts/addons/`
+
+Do not keep both a folder and a file with the same name — Blender reports *multiple addons with the same name*.  
+Then Preferences → Add-ons → refresh / restart → search **UCX**.
+
+### Other
+
+- In Add-ons search, type `UCX` or `Collision` (the list is filtered).
+- Make sure you are looking at Add-ons for Blender **4.3** (not another install).
+- `Window → Toggle System Console` (Windows) — import errors show a red traceback there.
+
+---
+---
+
+# UCX Collision Generator (PL)
+
 Dodatek do Blendera **4.3.2+** generujący automatyczne siatki kolizji **UCX** (wypukłe / convex) pod eksport do **Unreal Engine 5**.
 
 Przeznaczony głównie do skał, klifów i terenu — zamiast jednego AABB tworzy kilka wypukłych hulli dopasowanych do kształtu modelu.
 
 ---
 
-## Instalacja (EN)
-
-1. `Edit → Preferences → Add-ons → Install…`
-2. Select `ucx_collision_generator.py`
-3. Enable **UCX Collision Generator**
-4. Open the **3D Viewport** sidebar (`N`) → tab **UCX**
-
----
-
-## Instalacja (PL)
+## Instalacja
 
 1. `Edycja → Preferencje → Add-ony → Zainstaluj…`
-2. Wskaż plik `ucx_collision_generator.py`
+2. Wskaż **tylko** plik `ucx_collision_generator.py` (pojedynczy plik, nie cały folder repo)
 3. Włącz dodatek **UCX Collision Generator**
 4. W widoku 3D otwórz panel boczny (`N`) → zakładka **UCX**
+
+Pobieranie raw:  
+https://github.com/chr243/blender-ucx-collision-generator/raw/main/ucx_collision_generator.py
 
 ---
 
@@ -63,9 +208,7 @@ Przeznaczony głównie do skał, klifów i terenu — zamiast jednego AABB tworz
 - **Medium** — 18 hulli, balans
 - **High** — 28 hulli, drobniejszy podział
 
-Wszystkie presety mają **Preserve Cavities** włączone domyślnie.
-
-Po wyborze presetu wartości można dalej ręcznie zmieniać.
+Wszystkie presety mają **Preserve Cavities** włączone domyślnie. Po wyborze presetu wartości można dalej ręcznie zmieniać.
 
 ---
 
@@ -73,7 +216,7 @@ Po wyborze presetu wartości można dalej ręcznie zmieniać.
 
 Blender nie ma wbudowanego V-HACD. Dodatek (v1.2+) implementuje **BFS AABB median-split na chmurze wierzchołków** + `convex_hull`:
 
-1. Pobranie ewaluowanej siatki przez depsgraph (bez aplikowania modifierów na źródle).
+1. Pobranie ewaluowanej siatki przez depsgraph (bez destrukcyjnego aplikowania modifierów na źródle).
 2. Tymczasowy `bmesh` w **lokalnej przestrzeni** źródła + decimate.
 3. Zrównoważony podział wierzchołków (BFS) aż do limitu hulli / dokładności.
 4. Dla każdej części: czysty `bmesh.ops.convex_hull` (z usunięciem `geom_interior`), lekkie dopasowanie (expand), limit wierzchołków.
@@ -92,10 +235,11 @@ Gdy włączone, dodatek wykrywa **przelotowy tunel/łuk** (powietrze zewnętrzne
 Otwarte klify / pełne skały zwykle **nie** wchodzą w ten tryb (filtr ray + stosunek odległości środka do AABB).
 
 Przetestowane headless na Blender **4.3.2** (v1.3):
+
 - Poly Haven `rock_07`, `boulder_01`, `namaqualand_cliff_01/02`, `rock_face_02` (CC0) — solidy
 - Syntetyczne arch/tunnel (`SM_RockArch_Tunnel_01/02`) — centerline w większości otwarty, coverage ≥ 0.90
 
-Nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.0.
+Nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity = 1.0.
 
 ### Ograniczenia
 
@@ -116,7 +260,6 @@ Nazewnictwo UCX, delete/regenerate, niezaaplikowany scale/rotation, convexity=1.
 ## Licencja
 
 MIT
-
 
 ---
 
@@ -145,7 +288,7 @@ Skopiuj **wyłącznie** plik `ucx_collision_generator.py` (nie całe repo) do:
 - macOS: `~/Library/Application Support/Blender/4.3/scripts/addons/`
 - Linux: `~/.config/blender/4.3/scripts/addons/`
 
-Nie trzymaj jednocześnie folderu i pliku o tej samej nazwie — Blender zgłosi *multiple addons with the same name*.
+Nie trzymaj jednocześnie folderu i pliku o tej samej nazwie — Blender zgłosi *multiple addons with the same name*.  
 Potem Preferences → Add-ons → odśwież / restart → szukaj **UCX**.
 
 ### Inne
